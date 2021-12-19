@@ -17,5 +17,8 @@ func Connect() {
 		panic("Could not connect to the database")
 	}
 
-	conn.AutoMigrate(&models.User{})
+	err = conn.AutoMigrate(&models.User{})
+	if err != nil {
+		return
+	}
 }

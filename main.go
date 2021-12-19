@@ -25,5 +25,8 @@ func main() {
 		port = ":3000"
 	}
 
-	app.Listen(port)
+	err := app.Listen(port)
+	if err != nil {
+		panic("Port in use")
+	}
 }
