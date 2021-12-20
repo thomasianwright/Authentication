@@ -2,6 +2,7 @@ package database
 
 import (
 	"authapi/models"
+	"fmt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"os"
@@ -10,7 +11,7 @@ import (
 var DB *gorm.DB
 
 func Connect() {
-	conn, err := gorm.Open(mysql.Open(os.Getenv("connection")), &gorm.Config{})
+	conn, err := gorm.Open(mysql.Open(os.Getenv("connection")+"?parseTime=true"), &gorm.Config{})
 
 	DB = conn
 
@@ -18,8 +19,9 @@ func Connect() {
 		panic("Could not connect to the database")
 	}
 
-	err = conn.AutoMigrate(&models.User{})
+	err = conn.AutoMigrate(&models.User{}, &models.Activation{})
 	if err != nil {
+		fmt.Errorf(err.Error())
 		return
 	}
 }
