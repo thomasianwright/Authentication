@@ -3,13 +3,15 @@ package controllers
 import (
 	"authapi/database"
 	"authapi/models"
+	"encoding/json"
 	"fmt"
-	"github.com/dgrijalva/jwt-go"
-	"github.com/gofiber/fiber"
+	"github.com/ddliu/go-httpclient"
+	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v4"
 	uuid2 "github.com/nu7hatch/gouuid"
 	"golang.org/x/crypto/bcrypt"
+	"io/ioutil"
 	"os"
-	"strconv"
 	"time"
 )
 
@@ -27,6 +29,11 @@ const (
 const (
 	ActivateSuccess  = 1
 	ActivateNotFound = 2
+)
+
+const (
+	UpdateSuccess    = 1
+	UpdateNotSuccess = 2
 )
 
 const (
@@ -54,8 +61,10 @@ func Register(c *fiber.Ctx) error {
 		UpdatedAt: time.Now(),
 	}
 
-	err := database.DB.Create(&user)
-	if err != nil {
+	error := database.DB.Create(&user)
+
+	if error.Error != nil {
+		fmt.Println(error.Error)
 		return c.JSON(fiber.Map{
 			"status":  RegisterExists,
 			"message": "Username or email already exists",
@@ -71,7 +80,7 @@ func Register(c *fiber.Ctx) error {
 
 	errs := database.DB.Create(&activate)
 
-	if errs != nil {
+	if errs.Error != nil {
 		uuid, _ := uuid2.NewV4()
 
 		database.DB.Create(&models.Activation{
@@ -80,6 +89,37 @@ func Register(c *fiber.Ctx) error {
 		})
 	}
 
+	jsonReq, _ := json.Marshal(map[string]string{
+		"firstname": user.Firstname,
+		"lastname":  user.Lastname,
+		"email":     user.Email,
+		"token":     uuid.String(),
+	})
+
+	resp, _ := httpclient.WithHeader("Content-Type", "application/json").PostJson("https://localhost:7033/Email", string(jsonReq))
+
+	bodyBytes, _ := ioutil.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	type Response struct {
+		Status  int    `json:"status"`
+		Message string `json:"message"`
+	}
+
+	var responseData Response
+
+	json.Unmarshal(bodyBytes, &responseData)
+	m, _ := json.Marshal(responseData)
+	fmt.Println(string(m))
+
+	if responseData.Status != 1 {
+		return c.JSON(fiber.Map{
+			"status":  2,
+			"message": "Register failed contact support to activate your account.",
+		})
+	}
+
+	fmt.Println("User: " + user.Email + " Activation Code: " + uuid.String())
 	return c.JSON(fiber.Map{
 		"status":  RegisterSuccess,
 		"message": "Successfully registered",
@@ -98,7 +138,7 @@ func Login(c *fiber.Ctx) error {
 	database.DB.Where("email = ?", data["email"]).Or("username = ?", data["email"]).First(&user)
 
 	if user.Id == 0 {
-		c.Status(fiber.StatusNotFound)
+		c.Status(fiber.StatusOK)
 		return c.JSON(fiber.Map{
 			"message":     "User not found",
 			"loginStatus": LoginNotFound,
@@ -106,7 +146,7 @@ func Login(c *fiber.Ctx) error {
 	}
 
 	if err := bcrypt.CompareHashAndPassword(user.Password, []byte(data["password"])); err != nil {
-		c.Status(fiber.StatusBadRequest)
+		c.Status(fiber.StatusOK)
 		return c.JSON(fiber.Map{
 			"message":     "incorrect password",
 			"loginStatus": LoginNotFound,
@@ -114,7 +154,7 @@ func Login(c *fiber.Ctx) error {
 	}
 
 	if !user.Activated {
-		c.Status(fiber.StatusNotAcceptable)
+		c.Status(fiber.StatusOK)
 		return c.JSON(fiber.Map{
 			"message":     "Please check your email to activate your account!",
 			"loginStatus": LoginNotActivated,
@@ -125,58 +165,37 @@ func Login(c *fiber.Ctx) error {
 
 	database.DB.Save(&user)
 
-	claims := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.StandardClaims{
-		Issuer:    strconv.Itoa(int(user.Id)),
-		ExpiresAt: time.Now().Add(time.Hour * 3).Unix(),
-		IssuedAt:  time.Now().Unix(),
-	})
+	// Create the Claims
+	claims := jwt.MapClaims{
+		"issuer":    "authapi",
+		"id":        user.Id,
+		"firstname": user.Firstname,
+		"lastname":  user.Lastname,
+		"username":  user.Username,
+		"email":     user.Email,
+		"exp":       time.Now().Add(time.Hour * 3).Unix(),
+	}
 
-	token, tokenErr := claims.SignedString([]byte(os.Getenv("jwtsecret")))
-	if tokenErr != nil {
-		c.Status(fiber.StatusBadRequest)
+	// Create token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Generate encoded token and send it as response.
+	t, err := token.SignedString([]byte(os.Getenv("jwtsecret")))
+	if err != nil {
+		c.Status(fiber.StatusInternalServerError)
 		return c.JSON(fiber.Map{
-			"message": "Server Error",
+			"message": "Something went wrong",
+			"status":  500,
 		})
 	}
-
-	tokenCookie := fiber.Cookie{
-		Name:     "jwt",
-		Value:    token,
-		Expires:  time.Now().Add(time.Hour * 3),
-		HTTPOnly: true,
-	}
-
-	c.Cookie(&tokenCookie)
 
 	c.Status(fiber.StatusOK)
 	return c.JSON(fiber.Map{
 		"message":     "success",
-		"token":       token,
+		"token":       t,
 		"loginStatus": LoginSuccess,
+		"user":        user,
 	})
-}
-
-func User(c *fiber.Ctx) error {
-	cookie := c.Cookies("jwt")
-
-	token, err := jwt.ParseWithClaims(cookie, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return []byte(os.Getenv("jwtsecret")), nil
-	})
-
-	if err != nil {
-		c.Status(fiber.StatusUnauthorized)
-		return c.JSON(fiber.Map{
-			"message": "unauthorized",
-		})
-	}
-
-	claims := token.Claims.(*jwt.StandardClaims)
-
-	var user models.User
-
-	database.DB.Where("id = ?", claims.Issuer).First(&user)
-
-	return c.JSON(user)
 }
 
 func AuthenticateToken(c *fiber.Ctx) error {
@@ -187,7 +206,7 @@ func AuthenticateToken(c *fiber.Ctx) error {
 		return err
 	}
 
-	_, err := jwt.ParseWithClaims(data["token"], &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+	_, err := jwt.ParseWithClaims(data["token"], jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(os.Getenv("jwtsecret")), nil
 	})
 
@@ -213,7 +232,7 @@ func GetUserByToken(c *fiber.Ctx) error {
 		return err
 	}
 
-	token, err := jwt.ParseWithClaims(data["token"], &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(data["token"], jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(os.Getenv("jwtsecret")), nil
 	})
 
@@ -227,11 +246,11 @@ func GetUserByToken(c *fiber.Ctx) error {
 		})
 	}
 
-	claims := token.Claims.(*jwt.StandardClaims)
+	claims := token.Claims.(jwt.MapClaims)
 
 	var user models.User
 
-	database.DB.Where("id = ?", claims.Issuer).First(&user)
+	database.DB.Where("id = ?", claims["id"]).First(&user)
 
 	return c.JSON(user)
 }
@@ -244,8 +263,8 @@ func ActivateAccount(c *fiber.Ctx) error {
 	database.DB.Where("guid = ?", data["guid"]).First(&activation)
 
 	if activation.Id == 0 {
-		c.Status(fiber.StatusNotFound)
 		return c.JSON(fiber.Map{
+			"status":  ActivateNotFound,
 			"message": "Token not found",
 		})
 	}
@@ -258,8 +277,95 @@ func ActivateAccount(c *fiber.Ctx) error {
 	database.DB.Save(&user)
 	database.DB.Delete(&activation)
 
-	c.Status(fiber.StatusAccepted)
 	return c.JSON(fiber.Map{
+		"status":  ActivateSuccess,
 		"message": "success",
+		"user":    user,
+	})
+}
+
+func GetUser(c *fiber.Ctx) error {
+	jwtUser := c.Locals("user").(*jwt.Token)
+	claims := jwtUser.Claims.(jwt.MapClaims)
+	id := uint(claims["id"].(float64))
+
+	var user models.User
+	database.DB.Where("id = ?", id).First(&user)
+
+	return c.JSON(user)
+}
+
+func UpdateUser(c *fiber.Ctx) error {
+	jwtUser := c.Locals("user").(*jwt.Token)
+	claims := jwtUser.Claims.(jwt.MapClaims)
+	id := uint(claims["id"].(float64))
+
+	var user models.User
+	database.DB.Where("id = ?", id).First(&user)
+
+	var data map[string]string
+
+	if err := c.BodyParser(&data); err != nil {
+		fmt.Println(err.Error())
+		return c.JSON(fiber.Map{
+			"status":  0,
+			"message": "Something went wrong",
+		})
+	}
+
+	user.Firstname = data["firstname"]
+	user.Lastname = data["lastname"]
+	user.Username = data["username"]
+	user.Email = data["email"]
+
+	database.DB.Save(&user)
+
+	c.Status(fiber.StatusOK)
+
+	return c.JSON(fiber.Map{
+		"status":  UpdateSuccess,
+		"message": "success",
+		"user":    user,
+	})
+}
+
+func UpdatePassword(c *fiber.Ctx) error {
+	jwtUser := c.Locals("user").(*jwt.Token)
+	claims := jwtUser.Claims.(jwt.MapClaims)
+	fmt.Println(json.Marshal(claims))
+	id := uint(claims["id"].(float64))
+
+	var user models.User
+	database.DB.Where("id = ?", id).First(&user)
+
+	var data map[string]string
+
+	if err := c.BodyParser(&data); err != nil {
+		fmt.Println(err.Error())
+		return c.JSON(fiber.Map{
+			"status":  0,
+			"message": "Something went wrong",
+		})
+	}
+	if err := bcrypt.CompareHashAndPassword(user.Password, []byte(data["oldPassword"])); err != nil {
+		fmt.Println(err.Error())
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message":     "incorrect password",
+			"loginStatus": LoginNotFound,
+		})
+	}
+
+	newPassword, _ := bcrypt.GenerateFromPassword([]byte(data["newPassword"]), 14)
+	user.Password = newPassword
+	user.UpdatedAt = time.Now()
+	database.DB.Save(&user)
+
+	c.Status(fiber.StatusOK)
+
+	return c.JSON(fiber.Map{
+		"status":  UpdateSuccess,
+		"message": "success",
+		"user":    user,
 	})
 }

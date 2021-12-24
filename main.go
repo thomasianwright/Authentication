@@ -3,8 +3,9 @@ package main
 import (
 	"authapi/database"
 	"authapi/routes"
-	"github.com/gofiber/fiber"
-	"github.com/gofiber/fiber/middleware/cors"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/logger"
 	"os"
 )
 
@@ -12,7 +13,9 @@ func main() {
 	database.Connect()
 
 	app := fiber.New()
-
+	app.Use(logger.New(logger.Config{
+		Format: "[${ip}:${port}] ${method} ${path} ${status} ${latency} ${res_length}\n",
+	}))
 	app.Use(cors.New(cors.Config{
 		AllowCredentials: true,
 	}))
